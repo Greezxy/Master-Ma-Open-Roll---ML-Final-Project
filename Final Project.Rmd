@@ -1,0 +1,903 @@
+---
+title: |
+    | \vspace{3cm} \huge Final Project\vspace{1cm}
+author: |
+   | \large YINGZHI MA & Yulan Ren & Weiyi Gong  \vspace{1cm}
+date: '2023-04-26'
+toc: yes
+output: 
+  pdf_document: 
+    toc: yes
+    number_sections: yes
+  html_document: 
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r, warning=FALSE, message=FALSE, include=FALSE}
+library(ggplot2) 
+library(rvest)
+library(dplyr) 
+library(scales) 
+library(lubridate) 
+library(tidyverse) 
+library(tibble) 
+library(MASS) 
+library(pander)
+library(glmnet)
+library(tree)
+library(rpart)
+library(randomForest)
+library(pROC)
+library(e1071)
+library(caret)
+library(gbm)
+library(r02pro)
+library(vip)
+library(RColorBrewer)
+```
+
+\newpage
+
+# Introduction
+
+```{r message=FALSE, warning=FALSE}
+rawdata<-read_csv('cleaned.csv')
+```
+
+# Data Preparation
+
+## Data Cleaning
+
+In this section, perform data cleaning to the raw data. First, check if there are NA values in the columns of raw data.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## detect if there are NA values in the rawdata
+apply(is.na(rawdata), MARGIN = 2, sum)
+```
+
+It can be observed that many columns contain NA values. If a column contain two many NA values, we should remove this column as it contain little information and cannot help us predict or determine the sample Type. Thus, first of all, choose the columns that contain NA values less than 30 and remove the columns that contain more than 30 NA values. The result is shown as below:
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## Find the columns that contain NA values less then 30
+na_result<-data.frame(na_num=apply(is.na(rawdata), MARGIN = 2, sum))
+na_result_subset<-subset(na_result, na_num<30)
+pander(na_result_subset, 
+       caption="Columns that contain NA values less then 30")
+```
+
+Then, check the number of classes (levels) in the character (category) variables for the columns that contain NA values less then 30. The result is shown as below.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+rawdata_subset<-rawdata[rownames(na_result_subset)]
+character_subset<-rawdata_subset %>% select_if(~!is.numeric(.))
+unique_count<-function(x){
+  length(unique(x))
+}
+
+unique_count_df<-data.frame(unique_count=
+                              apply(character_subset, MARGIN = 2, unique_count))
+pander(unique_count_df, 
+       caption="Number of classes in the character variables")
+```
+
+Except the columns Patient ID, Sample ID that represents the patient or sample, I should choose the character (category) variables that contain less than 10 classes. Because there are only 151 samples, if a column contains two many classes, it cannot help us predict or determine the sample Type. So we should remove the column.\
+Besides, there are only 1 class in variables **Study ID**, **12-245 Part C Consented**, **Sample Class** and **Somatic Status**. We should also remove these variables.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## Choose the numeric variables and the character variables that contain less than 10 classes 
+unique_count_subset<-subset(unique_count_df, unique_count<10 & unique_count>1)
+unique_count_variables<-rownames(unique_count_subset)
+numeric_variables<-rawdata_subset %>% 
+  select_if(is.numeric) %>%colnames()
+select_variables<-c(unique_count_variables, numeric_variables)
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## select the subset
+select_subset<-rawdata[select_variables]
+## detect if there are NA values in the rawdata
+na_count_select_subset<-
+  data.frame(na_num=apply(is.na(select_subset), MARGIN = 2, sum))
+
+pander(na_count_select_subset, 
+       caption="Number of NA values in the select subset")
+```
+
+Now we want to remove the missing values from the data.
+
+```{r}
+# remove missing values
+select_subset_clean<-select_subset[complete.cases(select_subset),]
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## convert character to factors
+select_subset_clean<-
+  select_subset_clean%>%mutate_if(is.character,factor)
+select_subset_clean
+```
+
+Initial selection of the predictors include social demographics, behavioral habits, and relevant cancer diagnosis, treatment and genomic data based on field knowledge. The response variable is Distant Metastasis and predictors include: Sex, Race Category, Alcohol History, Smoking History, Detailed Primary Site, Initial Treatment, Fraction Genome Altered, Mutation Count, Cancer Type Detailed, and Disease Free Months. 
+
+```{r}
+select_subset_clean<-select_subset_clean[,c(1,3,4,8,10,13,15,20,22,17,21)]
+head(select_subset_clean)
+```
+
+After that we organize the variable names in the data to facilitate later predictions
+
+```{r}
+# Replace spaces in column names with underscores, otherwise many model functions will not be recognised
+(clean_New_columns<-colnames(select_subset_clean))
+clean_New_columns<-gsub(" ","_", clean_New_columns)
+colnames(select_subset_clean)<-clean_New_columns
+# Rename the column with the brackets to prevent the model calculation function from not recognizing it
+colnames(select_subset_clean)[8]<-'Disease_Free_M'
+```
+
+We replace variables in string form with numbers for greater simplicity.
+
+```{r}
+select_subset_clean$`Alcohol_History_Documented`<-as.numeric(select_subset_clean$`Alcohol_History_Documented`) 
+select_subset_clean$`Cancer_Type_Detailed`<-as.numeric(select_subset_clean$`Cancer_Type_Detailed`)
+select_subset_clean$`Distant_Metastasis`<-as.numeric(select_subset_clean$`Distant_Metastasis`)
+select_subset_clean$`Initial_Treatment`<-as.numeric(select_subset_clean$`Initial_Treatment`)
+select_subset_clean$`Detailed_Primary_Site`<-as.numeric(select_subset_clean$`Detailed_Primary_Site`)
+select_subset_clean$`Race_Category`<-as.numeric(select_subset_clean$`Race_Category`)
+select_subset_clean$`Sex`<-as.numeric(select_subset_clean$`Sex`)
+select_subset_clean$`Smoking_History`<-as.numeric(select_subset_clean$`Smoking_History`)
+```
+
+We then convert the factorial variable back to its original form
+
+```{r}
+select_subset_clean$`Alcohol_History_Documented`<-as.factor(select_subset_clean$`Alcohol_History_Documented`) 
+select_subset_clean$`Cancer_Type_Detailed`<-as.factor(select_subset_clean$`Cancer_Type_Detailed`)
+select_subset_clean$`Distant_Metastasis`<-as.factor(select_subset_clean$`Distant_Metastasis`)
+select_subset_clean$`Initial_Treatment`<-as.factor(select_subset_clean$`Initial_Treatment`)
+select_subset_clean$`Detailed_Primary_Site`<-as.factor(select_subset_clean$`Detailed_Primary_Site`)
+select_subset_clean$`Race_Category`<-as.factor(select_subset_clean$`Race_Category`)
+select_subset_clean$`Sex`<-as.factor(select_subset_clean$`Sex`)
+select_subset_clean$`Smoking_History`<-as.factor(select_subset_clean$`Smoking_History`)
+```
+
+Next we take the factorial variables and generate the corresponding dummy variables according to the different classifications of each variable, and keep the continuous variables.
+
+```{r message=FALSE, warning=FALSE}
+dummies<-dummyVars(Distant_Metastasis~Alcohol_History_Documented+Cancer_Type_Detailed+
+Detailed_Primary_Site+Initial_Treatment+Race_Category+Sex+Smoking_History,data=select_subset_clean,fullRank=F)
+select_subset_clean_new<-as.data.frame(predict(dummies,newdata=select_subset_clean))
+select_subset_clean_new$Distant_Metastasis<-ifelse(select_subset_clean$Distant_Metastasis == 2,1,0)
+select_subset_clean_new$Disease_Free_M<-select_subset_clean$Disease_Free_M
+select_subset_clean_new$Mutation_Count<-select_subset_clean$Mutation_Count
+select_subset_clean_new$Fraction_Genome_Altered<-select_subset_clean$Fraction_Genome_Altered
+```
+
+
+```{r}
+pander(head(select_subset_clean_new),caption='Partial display of cleaned final data')
+```
+
+## Division of the training and test sets
+
+```{r}
+set.seed(0)
+sample<-sample(c(T,F),nrow(select_subset_clean_new),replace=T,prob=c(0.7,0.3))
+# We allocate the training and test sets according to 7:3
+data_tr<-select_subset_clean_new[sample,]
+data_te<-select_subset_clean_new[!sample,]
+```
+
+
+## KNN
+
+The KNN method is a common nonlinear method for making predictions based on data. We will split the training and validation sets in the training set to find the best hyperparameter K, K being the nearest K data to that data set.
+
+```{r KNN-CV}
+# KNN 5-fold CV to tune hyper-parameters
+K <- 5 # Prepare to divide the training set into five parts
+set.seed(0)
+fold_ind <- sample(1:K, nrow(data_tr), replace = TRUE)
+set.seed(0)
+
+cv_knn_recall_array = vector()
+cv_knn_precision_array = vector()
+k<-vector()
+
+for (i in seq(1,20,1)){
+  k[i]<-i
+  
+cv_knn_recall <-mean(sapply(1:K, function(j){
+fitknn <- knn3(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], k = i) 
+predknn <- predict(fitknn, newdata = data_tr[fold_ind == j, ], type = "class")
+true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & predknn == 1)
+false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & predknn == 0)
+true_positives / (true_positives + false_negatives)}))
+
+cv_knn_recall_array[i]<-cv_knn_recall
+  
+cv_knn_precision <-mean(sapply(1:K, function(j){
+fitknn <- knn3(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], k = i) 
+predknn <- predict(fitknn, newdata = data_tr[fold_ind == j, ], type = "class")
+true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & predknn == 1)
+false_positive <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 0 & predknn == 1)
+true_positives / (true_positives + false_positive)
+
+}))
+
+cv_knn_precision_array[i]<-cv_knn_precision
+
+}
+
+df_knn<-na.omit(data.frame(k,cv_knn_recall_array, cv_knn_precision_array))
+
+df_knn%>% ggplot(aes(x=k))+
+  geom_point(aes(y=cv_knn_recall_array, color = "recall" ),shape=17,size=3)+
+  geom_point(aes(y=cv_knn_precision_array, color = "precision" ),size=3)+scale_color_manual(values=c("orange", "lightblue"))+theme_light()
+
+#select the best k from the highest recall, 
+#if multiple highest recall, 
+#select the one with the highest precision 
+best_k<-subset(df_knn, cv_knn_recall_array == 
+                 max(cv_knn_recall_array))[which.max(cv_knn_precision_array), "k"]
+
+cat("Hyperparameter k =", best_k,  "\n")
+
+#testing set: recall
+fitknn <- knn3(factor(Distant_Metastasis) ~., data = data_tr, k = best_k) 
+predknn <- predict(fitknn, newdata = data_te, type = "class")
+true_positives <- sum(data_te$Distant_Metastasis == 1 & predknn == 1)
+false_negatives <- sum(data_te$Distant_Metastasis == 1 & predknn == 0)
+false_positive <- sum(data_te$Distant_Metastasis == 0 & predknn == 1)
+true_negative <- sum(data_te$Distant_Metastasis == 0 & predknn == 0)
+cat("Recall:", true_positives / (true_positives + false_negatives),  "\n")
+cat("Precision:", true_positives / (true_positives + false_positive),"\n")
+
+knn_recall <-true_positives / (true_positives + false_negatives)
+knn_precision <- true_positives / (true_positives + false_positive)
+
+#accuracy
+acc_knn<- (true_positives+true_negative)/(true_positives+true_negative
+                                          +false_negatives+false_positive)
+
+#auc
+roc_knn<- roc(data_te$Distant_Metastasis, as.numeric(predknn), smooth = F)
+auc_knn<- auc(roc_knn)
+cat("AUC:", auc_knn)
+
+```
+
+The best knn function we selected through cross-validation had a k value of 15. Once we determined this best k value, we used the entire training set as the training model and made predictions in the test set, and calculated the AUC, precision and recall of the knn model with k=15 in the test set.
+
+```{r}
+# Calculate the best split point and optimal threshold for the best knn model in the test set
+(cutOffPoint_knn<-coords(roc_knn,'best'))
+```
+
+Draw the ROC curve of the best knn model in the test set and label the confidence interval of this ROC curve in the graph with the AUC value.
+
+```{r message=FALSE, warning=FALSE}
+knn_ci<-ci.se(roc_knn,specificities=seq(0,1,0.01))
+data_knn_ci<-knn_ci[1:101,1:3]
+data_knn_ci<-as.data.frame(data_knn_ci)
+x=as.numeric(rownames(data_knn_ci))
+data_knn_ci<-data.frame(x,data_knn_ci)
+ggroc(roc_knn,col='purple',legacy.axes=F,cex=1)+
+geom_segment(aes(x=1,y=0,xend=0,yend=1),colour='black',linetype ='dotdash',cex=.8)+
+geom_ribbon(aes(x=x,ymin=X2.5.,ymax=X97.5.),fill='lightgreen',alpha=0.5,data_knn_ci)+
+labs(title='KNN_ROC')+
+annotate(geom='text',x=0.06,y=0,label='AUC=0.468599',col='darkgreen')+
+theme_light()+guides(colour='none')
+```
+
+We found that the AUC values were less than 0.5 and the ROC curves were also below the diagonal, indicating that the best knn model was not classifying well. For one thing, an AUC value of less than 0.5 indicates that the classifier may predict the opposite effect, i.e. a prediction that should have been predicted as a transfer is not a transfer. This is i.e. detrimental to our analysis. Secondly, the AUC value of the model is very close to 0.5. We know that when the AUC value of a classifier is equal to 0.5, it means that the classifier does not work and cannot distinguish correctly. Therefore, the AUC value of this model is very close to 0.5, which means that the classifier is also not effective in classifying.
+
+
+## Logistic Regression
+
+We fitted the model using cv.glmnet. The reason for setting the maxit parameter separately is that the algorithm gives a warning when we set it to the default; glm.fit: the algorithm does not aggregate. As the glm function iterates to solve for the regression coefficients by the principle of great likelihood estimation, when the data distribution is out of balance, the algorithm is not yet able to converge after the iterations. We can solve this problem by adjusting the maxit parameter to change the maximum number of iterations.
+
+We will find the best penalty factor in the phase difference validation, referred to by alpha in cv.glmnet. Due to the small sample data, we are concerned that the fitted model coefficients may be more extreme, which has no effect on the training set, but will have a greater impact on the test set predictions, increasing the bias leading to a reduction in the model's prediction accuracy in the test set. We therefore wish to introduce a penalty factor to the model coefficients so as to limit the range of model fitted coefficients. Building on the Lasso and ridge regression methods introduced in the original class, we introduce elastic net regression, allowing cv.glmnet to find the best penalty factor alpha in the alpha range [0,1]. thus determining our model.
+
+```{r Logistic Regression CV}
+#Logistic Regression with 5-fold CV to tune hyper-parameters
+#Logistic Regression with 5-fold CV to tune hyper-parameters
+K <- 5
+set.seed(0)
+fold_ind <- sample(1:K, nrow(data_tr), replace = TRUE)
+set.seed(0)
+
+penalty = vector()
+cv_log_recall_array = vector()
+cv_log_precision_array = vector()
+
+data_tr_x<- data_tr[, -27]
+data_tr_y<-data_tr[,27]
+
+for (i in seq(0,1,0.2)){
+
+penalty[i*5+1]<-i
+
+cv_log_recall <-mean(sapply(1:K, function(j){
+
+logfit<-cv.glmnet(as.matrix(data_tr_x)[fold_ind != j, ], as.matrix(data_tr_y)[fold_ind != j, ], family=binomial, maxit= 10000, alpha = i)
+
+predlog <- predict(logfit, newx = as.matrix(data_tr_x)[fold_ind == j, ], type ="response")
+predlog<-ifelse(predlog>0.5,1,0)
+true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & predlog == 1)
+false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & predlog == 0)
+true_positives / (true_positives + false_negatives)}))
+
+cv_log_recall_array[i*5+1]<-cv_log_recall
+
+cv_log_precision <-mean(sapply(1:K, function(j){
+logfit<-cv.glmnet(as.matrix(data_tr_x)[fold_ind != j, ], as.matrix(data_tr_y)[fold_ind != j, ], family=binomial, maxit= 10000, alpha = i)
+
+predlog <- predict(logfit, newx = as.matrix(data_tr_x)[fold_ind == j, ], type ="response")
+predlog<-ifelse(predlog>0.5,1,0)
+true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & predlog == 1)
+false_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 0 & predlog == 1)
+true_positives / (true_positives + false_positives)}))
+
+cv_log_precision_array[i*5+1]<-cv_log_precision
+
+}
+
+df_log<-na.omit(data.frame(penalty,cv_log_recall_array, cv_log_precision_array))
+```
+
+
+```{r Logistic Regression Plot}
+df_log%>% ggplot(aes(x=penalty))+
+  geom_point(aes(y=cv_log_recall_array, color = "recall" ),shape=17,size=3)+
+  geom_point(aes(y=cv_log_precision_array, color = "precision" ),size=3)+scale_color_manual(values=c("orange", "lightblue"))+theme_light()
+```
+
+```{r logistic regression test set}
+#select the best alpha from the highest recall and then the highest precision 
+best_alpha <-subset(df_log, cv_log_recall_array == max(cv_log_recall_array))
+best_alpha<- best_alpha$penalty[which.max(best_alpha$cv_log_precision_array)]
+
+cat("Hyperparameter penalty, alpha =", best_alpha,  "\n")
+
+#testing set: recall
+logfit<-cv.glmnet(as.matrix(data_tr_x), as.matrix(data_tr_y), 
+                  family=binomial, maxit= 10000, alpha = best_alpha)
+
+data_te_x<- data_te[, -27]
+data_te_y<-data_te[,27]
+
+predlog <- predict(logfit, newx = as.matrix(data_te_x), type ="response")
+predlog<-ifelse(predlog>0.5,1,0)
+
+true_positives <- sum(data_te$Distant_Metastasis == 1 & predlog == 1)
+false_negatives <- sum(data_te$Distant_Metastasis == 1 & predlog == 0)
+false_positive <- sum(data_te$Distant_Metastasis == 0 & predlog == 1)
+true_negative <- sum(data_te$Distant_Metastasis == 0 & predlog == 0)
+
+cat("Recall:", true_positives / (true_positives + false_negatives),  "\n")
+cat("Precision:", true_positives / (true_positives + false_positive))
+
+log_recall <-true_positives / (true_positives + false_negatives)
+log_precision <- true_positives / (true_positives + false_positive)
+
+#accuracy
+acc_log<-(true_positives+true_negative)/(true_positives+true_negative
+                                         +false_negatives+false_positive)
+
+#auc
+roc_log<- roc(data_te$Distant_Metastasis, as.numeric(predlog), smooth = F)
+auc_log<- auc(roc_log)
+cat("AUC:", auc_log)
+```
+
+The best logistics function with best penalty we selected through cross-validation had a alpha of 0.6. Once we determined this best alpha, we used the entire training set as the training model and made predictions in the test set, and calculated the AUC, precision and recall of the logistics model with penalty of 0.6 in the test set.
+
+```{r}
+logfit%>%vip(num_features = 9,geom ='col',aesthetics=list(fill=brewer.pal(9,"Set1")))
+```
+
+We found that the most important predictors given by the best logistic regression models for predicting the metastasis of cancer include detailed primary site, cancer type detail, etc. We will also look at the importance of the other predictors later. We will also look at the importance of the predictors given by other models later.
+
+
+```{r}
+# Calculate the best split point and optimal threshold for the best logistic model in the test set
+(cutOffPoint_log<-coords(roc_log,'best'))
+cutOffPointText_log<-paste0(round(cutOffPoint_log[1],3),"(",round(cutOffPoint_log[2],3),",",
+round(cutOffPoint_log[3],3),")")
+```
+
+The ROC curve of the best logistic model in the test set is drawn and the confidence interval and AUC value of this ROC curve as well as the optimal split point and optimal threshold are indicated in the graph.
+
+```{r message=FALSE, warning=FALSE}
+log_ci<-ci.se(roc_log,specificities=seq(0,1,0.01))
+data_log_ci<-log_ci[1:101,1:3]
+data_log_ci<-as.data.frame(data_log_ci)
+x=as.numeric(rownames(data_log_ci))
+data_log_ci<-data.frame(x,data_log_ci)
+ggroc(roc_log,col='purple',legacy.axes=F,cex=1)+
+geom_segment(aes(x=1,y=0,xend=0,yend=1),colour='black',linetype ='dotdash',cex=.8)+
+geom_ribbon(aes(x=x,ymin=X2.5.,ymax=X97.5.),fill='lightgreen',alpha=0.5,data_log_ci)+
+labs(title='Logistics ROC')+
+geom_point(aes(x=cutOffPoint_log[[2]],y =cutOffPoint_log[[3]]),col='darkorange')+
+geom_text(aes(x = cutOffPoint_log[[2]],y=cutOffPoint_log[[3]],
+label=cutOffPointText_log,col='darkorange'),vjust=-1)+
+annotate(geom='text',x=0.06,y=0,label='AUC=0.6690821',col='darkgreen')+
+theme_light()+guides(colour='none')
+```
+
+The AUC values and ROC curves of this model in the test set indicate that this is a successful classification model, and we will make a uniform comparison with other models at the end to select the most suitable prediction model for our project.
+
+
+
+## Random Forest
+
+A random forest is generated by a boot-strap resampling technique, in which k samples are repeatedly drawn from the original training set of samples, and then a random forest of k decision trees is generated based on the set of self-help samples, with the classification result of the new data determined by the number of votes in the decision trees. By and large the more trees the better, but since we are using small data we are concerned that using too many trees will cause overfitting problems, so we will find the optimal number of trees in cross-validation, i.e. the ntree hyperparameter in the randomForest function.
+
+
+
+
+
+```{r Random Forest}
+#Random Forest with 5-fold CV to tune hyper-parameters
+K <- 5
+set.seed(0)
+fold_ind <- sample(1:K, nrow(data_tr), replace = TRUE)
+set.seed(0)
+
+ntree = vector()
+cv_rt_recall_array = vector()
+cv_rt_precision_array = vector()
+```
+
+```{r}
+#selecting a range for ntrees with a logarithmic scale
+n_trees_range <- round(10^seq(1, 4))
+cv_rt_recall_array <- numeric(length(n_trees_range))
+cv_rt_precision_array <- numeric(length(n_trees_range))
+
+set.seed(0)
+
+for (i in n_trees_range){
+
+ntree[log10(i)]<-i
+
+cv_rt_recall <-mean(sapply(1:K, function(j){
+
+rf.t <- randomForest(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], 
+                     importance = TRUE, ntree = i)
+pred_rt <- predict(rf.t, newdata = data_tr[fold_ind == j, ], type = "class")
+
+true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & pred_rt == 1)
+false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & pred_rt == 0)
+true_positives / (true_positives + false_negatives)}))
+
+cv_rt_recall_array[log10(i)]<-cv_rt_recall
+  
+cv_rt_precision <-mean(sapply(1:K, function(j){
+rf.t <- randomForest(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], 
+                     importance = TRUE, ntree = i)
+pred_rt <- predict(rf.t, newdata = data_tr[fold_ind == j, ], type = "class")
+true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & pred_rt == 1)
+false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & pred_rt == 0)
+true_positives / (true_positives + false_positive)
+
+}))
+
+cv_rt_precision_array[log10(i)]<-cv_rt_precision
+
+}
+
+df_rt<-na.omit(data.frame(ntree,cv_rt_recall_array, cv_rt_precision_array))
+best_ntree <-subset(df_rt, cv_rt_recall_array == max(cv_rt_recall_array))
+best_ntree <-best_ntree$ntree[which.max(best_ntree$cv_rt_precision_array)]
+best_ntree
+```
+The best ntrees selected from the log scale is 100, so we will test the range 5,500. 
+
+
+```{r Random Forest CV}
+for (i in seq(50,500,50)){
+
+ntree[i/50]<-i
+
+cv_rt_recall <-mean(sapply(1:K, function(j){
+
+rf.t <- randomForest(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], 
+                     importance = TRUE, ntree = i)
+pred_rt <- predict(rf.t, newdata = data_tr[fold_ind == j, ], type = "class")
+
+true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & pred_rt == 1)
+false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & pred_rt == 0)
+true_positives / (true_positives + false_negatives)}))
+
+cv_rt_recall_array[i/50]<-cv_rt_recall
+  
+cv_rt_precision <-mean(sapply(1:K, function(j){
+rf.t <- randomForest(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], 
+                     importance = TRUE, ntree = i)
+pred_rt <- predict(rf.t, newdata = data_tr[fold_ind == j, ], type = "class")
+true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & pred_rt == 1)
+false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & pred_rt == 0)
+true_positives / (true_positives + false_positive)
+
+}))
+
+cv_rt_precision_array[i/50]<-cv_rt_precision
+
+}
+
+
+df_rt<-na.omit(data.frame(ntree,cv_rt_recall_array, cv_rt_precision_array))
+```
+
+
+```{r Random Forest plot}
+df_rt%>% ggplot(aes(x= ntree))+
+  geom_point(aes(y=cv_rt_recall_array, color = "recall" ),shape=17,size=3)+
+  geom_point(aes(y=cv_rt_precision_array, color = "precision" ),size=3)+scale_color_manual(values=c("orange", "lightblue"))+theme_light()
+```
+
+
+```{r random forest test set}
+#select the best number of trees from the highest recall and then the highest precision 
+best_ntree <-subset(df_rt, cv_rt_recall_array == max(cv_rt_recall_array))
+best_ntree <-best_ntree$ntree[which.max(best_ntree$cv_rt_precision_array)]
+
+cat("Hyperparameter ntree:", best_ntree,  "\n")
+
+set.seed(0)
+rf.t <- randomForest(factor(Distant_Metastasis) ~., data = data_tr, 
+                     importance = TRUE, ntree = best_ntree)
+pred_rt <- predict(rf.t, newdata = data_te, type = "class")
+
+true_positives <- sum(data_te$Distant_Metastasis == 1 & pred_rt == 1)
+false_negatives <- sum(data_te$Distant_Metastasis == 1 & pred_rt == 0)
+false_positive <- sum(data_te$Distant_Metastasis == 0 & pred_rt == 1)
+true_negative <- sum(data_te$Distant_Metastasis == 0 & pred_rt == 0)
+
+cat("Recall:", true_positives / (true_positives + false_negatives),  "\n")
+cat("Precision:", true_positives / (true_positives + false_positive))
+
+rt_recall <-true_positives / (true_positives + false_negatives)
+rt_precision <- true_positives / (true_positives + false_positive)
+
+#accuracy
+acc_rf<- (true_positives+true_negative)/(true_positives
+                                         +true_negative+false_negatives+false_positive)
+
+#auc
+roc_rt<- roc(data_te$Distant_Metastasis, as.numeric(pred_rt), smooth = F)
+auc_rt<- auc(roc_rt)
+cat("AUC:", auc_rt)
+```
+
+
+```{r random forest plot}
+names<-c("Alcohol History: Current", "Alcohol History: Former", "Alcohol History: Never", "Other Cancer Type", "Salivary Carcinoma", "Squamous Cell Carcinoma", "Site: Oral Cavity", "Site: Other", "Site: Pharynx", "Chemotherapy", "Chemotherapy Radiation", "Chemotherapy Radiation Surgery", "Radiation", "Radiation Surgery", "Surgery","Asian Indian Pakistani", "Black", "Chinese", "Hispanic", "Unknown", "White", "Female", "Male", "Smoking History: Current", "Smoking: Former", "Smoking: Never", "Disease Free Month", "Mutation Count", "Fraction Genome Altered")
+
+rf_importance.df<-data.frame(importance(rf.t, scale = TRUE))
+rf_importance.df$variables<-names
+rf_importance.df%>%ggplot(aes(x=variables, y=MeanDecreaseGini, fill=variables))+
+geom_bar(stat = "identity")+
+theme_bw()+
+theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+labs(title="Random Forest: Variable Importance")+
+theme(plot.title = element_text(hjust = 0.5))+
+guides(fill=F)
+
+```
+
+The best random forest function with best ntree we selected through cross-validation is 400. Once we determined this best ntree, we used the entire training set as the training model and made predictions in the test set, and calculated the AUC, precision and recall of the random forest model with ntree of 400 in the test set.
+
+
+The figure above gives the importance of the predictors for the best random forest model. We find that unlike logistic regression, mutation count is the most important predictor, which is actually more in line with medical practice.
+
+```{r}
+# Calculate the best split point and optimal threshold for the best random forest model in the test set
+(cutOffPoint_rt<-coords(roc_rt,'best'))
+cutOffPointText_rt<-paste0(round(cutOffPoint_rt[1],3),"(",round(cutOffPoint_rt[2],3),",",
+round(cutOffPoint_rt[3],3),")")
+```
+
+The ROC curve of the best random forest model in the test set is drawn and the confidence interval and AUC value of this ROC curve as well as the optimal split point and optimal threshold are indicated in the graph.
+
+```{r message=FALSE, warning=FALSE}
+rt_ci<-ci.se(roc_rt,specificities=seq(0,1,0.01))
+data_rt_ci<-log_ci[1:101,1:3]
+data_rt_ci<-as.data.frame(data_rt_ci)
+x=as.numeric(rownames(data_rt_ci))
+data_rt_ci<-data.frame(x,data_rt_ci)
+ggroc(roc_rt,col='purple',legacy.axes=F,cex=1)+
+geom_segment(aes(x=1,y=0,xend=0,yend=1),colour='black',linetype ='dotdash',cex=.8)+
+geom_ribbon(aes(x=x,ymin=X2.5.,ymax=X97.5.),fill='lightgreen',alpha=0.5,data_rt_ci)+
+labs(title='Random Forest ROC')+
+geom_point(aes(x=cutOffPoint_rt[[2]],y =cutOffPoint_rt[[3]]),col='darkorange')+
+geom_text(aes(x = cutOffPoint_rt[[2]],y=cutOffPoint_rt[[3]],
+label=cutOffPointText_rt,col='darkorange'),vjust=-1)+
+annotate(geom='text',x=0.06,y=0,label='AUC=0.6690821',col='darkgreen')+
+theme_light()+guides(colour='none')
+```
+
+The AUC values and ROC curves of this model in the test set indicate that this is a successful classification model, and we will make a uniform comparison with other models at the end to select the most suitable prediction model for our project.
+
+## Gradient Boosting 
+
+
+The gradient ascent tree first learns a regression tree (there is obviously no way to accumulate the results of classification trees, so the trees in GBDT are all regression trees), then the residuals are obtained by taking the true value - predicted value, then the residuals are used as a learning target to learn the next regression tree, and so on, until the residuals are less than some threshold close to 0 or the number of regression trees reaches a certain threshold.
+
+The core idea is to reduce the loss function by fitting the residuals in each round. In general, the first tree is normal and all subsequent trees are determined by the residuals.
+
+Finally, the loss function is reduced using a gradient descent algorithm. In order to minimize the general loss function, a gradient descent algorithm is used to move the tree towards the negative gradient of the loss function one at a time, eventually making the loss function very small (this method requires the loss function to be derivable). The most accurate model is thus obtained.
+
+We will find the best hyperparameters in cross-validation:
+
+ntree: The total number of trees to fit. This is equivalent to the number of iterations and the number of basis functions in the additive expansion.Generally speaking the larger the better, but given the small size of our dataset we wanted to find the right number of trees to avoid over-fitting.
+
+interaction.depth: The maximum depth of variable interactions. 1 implies an additive model, 2 implies a model with up to 2-way interactions, etc. Again, to Again, to reduce overfitting we want to find the optimal depth of interaction
+
+shrinkage: a shrinkage parameter applied to each tree in the expansion. Also known as the learning rate or step-size reduction.
+This is generally set to between [0.01-0.1]. Again, we want to find the optimal learning rate to prevent overfitting.
+
+
+```{r warning=FALSE}
+#Gradient Boosting with 5-fold CV to tune hyperparameters
+
+K <- 5
+set.seed(0)
+fold_ind <- sample(1:K, nrow(data_tr), replace = TRUE)
+set.seed(0)
+```
+
+```{r}
+#selecting a range for ntrees with a logarithmic scale
+n_trees_range <- round(10^seq(1,4))
+ntree<-round(10^seq(1,4))
+cv_gb_recall_array <- numeric(length(n_trees_range))
+cv_gb_precision_array <- numeric(length(n_trees_range))
+
+set.seed(0)
+
+for (i in n_trees_range){
+
+ntree[log10(i)]<-i
+
+
+cv_gb_recall <-mean(sapply(1:K, function(j){
+ gbm_fit<-gbm(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], 
+              distribution = "multinomial", n.tree= i, 
+              interaction.depth = 1, shrinkage=0.01)
+  pred_gb<-predict(gbm_fit,data_tr[fold_ind == j, ],type='response')
+  pred_gb<-as.data.frame(pred_gb)
+  gbm<-ifelse(pred_gb$'0' > pred_gb$'1', 0, 1)
+  true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & gbm == 1)
+  false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & gbm == 0)
+  true_positives / (true_positives + false_negatives)}))
+
+cv_gb_recall_array[log10(i)]<-cv_gb_recall
+
+ cv_gb_precision <-mean(sapply(1:K, function(j){
+ gbm_fit<-gbm(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], 
+              distribution = "multinomial", n.tree=i, 
+              interaction.depth = 1, shrinkage=0.01)
+  pred_gb<-predict(gbm_fit,data_tr[fold_ind == j, ],type='response')
+  pred_gb<-as.data.frame(pred_gb)
+  gbm<-ifelse(pred_gb$'0' > pred_gb$'1', 0, 1)
+  true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & gbm == 1)
+  false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & gbm == 0)
+  true_positives / (true_positives + false_negatives)}))
+
+cv_gb_precision_array[log10(i)]<-cv_gb_precision
+
+}
+
+df_gbm<-na.omit(data.frame(ntree,cv_gb_recall_array, cv_gb_precision_array))
+best_ntree <-subset(df_gbm, cv_gb_recall_array == max(cv_gb_recall_array))
+best_ntree <-best_ntree$ntree[which.max(best_ntree$cv_gb_precision_array)]
+best_ntree
+```
+
+With the log scale, we found the best ntree to be at 10, so we will try ntrees in the range (10,100,500)
+
+```{r warning=FALSE}
+param <- expand.grid(shrinkage = c(0.01, 0.05, 0.1),
+                     n.trees = c(10,100,500),
+                     depth=c(1,5,10))
+gbtree = vector()
+shrink = vector()
+depth = vector()
+cv_gb_recall_array = vector()
+cv_gb_precision_array = vector()
+
+
+for (i in seq(1,nrow(param),1)){
+  shrink[i]<- param$shrinkage[i]
+  gbtree[i]<- param$n.tree[i]
+  depth[i]<-param$depth[i]
+  
+set.seed(0)
+  cv_gb_recall <-mean(sapply(1:K, function(j){
+ gbm_fit<-gbm(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], 
+              distribution = "multinomial", n.tree=param$n.tree[i], 
+              interaction.depth = param$depth[i], shrinkage=param$shrinkage[i])
+  pred_gb<-predict(gbm_fit,data_tr[fold_ind == j, ],type='response')
+  pred_gb<-as.data.frame(pred_gb)
+  gbm<-ifelse(pred_gb$'0' > pred_gb$'1', 0, 1)
+  true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & gbm == 1)
+  false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & gbm == 0)
+  true_positives / (true_positives + false_negatives)}))
+
+cv_gb_recall_array[i]<-cv_gb_recall
+
+ cv_gb_precision <-mean(sapply(1:K, function(j){
+ gbm_fit<-gbm(factor(Distant_Metastasis) ~., data = data_tr[fold_ind != j, ], 
+              distribution = "multinomial", n.tree=param$n.tree[i], 
+              interaction.depth = param$depth[i], shrinkage=param$shrinkage[i])
+  pred_gb<-predict(gbm_fit,data_tr[fold_ind == j, ],type='response')
+  pred_gb<-as.data.frame(pred_gb)
+  gbm<-ifelse(pred_gb$'0' > pred_gb$'1', 0, 1)
+  true_positives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & gbm == 1)
+  false_negatives <- sum(data_tr[fold_ind == j, ]$Distant_Metastasis == 1 & gbm == 0)
+  true_positives / (true_positives + false_negatives)}))
+
+cv_gb_precision_array[i]<-cv_gb_precision
+  
+}
+
+df_gbm <- data.frame(shrink, cv_gb_recall_array, cv_gb_precision_array,gbtree,depth)
+```
+
+
+```{r warning=FALSE}
+# 5D Plot
+p<-df_gbm%>% ggplot(aes(x= shrink))+
+  geom_point(aes(y=cv_gb_recall_array, color = "recall" ),shape=17,size=3)+
+  geom_point(aes(y=cv_gb_precision_array, color = "precision" ),size=3)+scale_color_manual(values=c("orange", "lightblue"))
+  
+p+facet_grid(gbtree~depth)+theme_light()
+```
+
+
+```{r gbm test set}
+best_params <-subset(df_gbm, cv_gb_recall_array == max(cv_gb_recall_array))
+best_params <-subset(best_params, cv_gb_precision_array == max(cv_gb_precision_array))
+best_params<-subset(best_params, depth == min(depth))
+best_params
+
+cat("Hyperparameters: shrinkage", best_params$shrink, "ntree:",
+    best_params$gbtree,"depth:",best_params$depth, "\n")
+
+gbm_fit<-gbm(factor(Distant_Metastasis) ~., data = data_tr, 
+             distribution = "multinomial", n.tree=best_params$gbtree,
+             interaction.depth = best_params$depth, shrinkage=best_params$shrink)
+  pred_gb<-predict(gbm_fit,data_te,type='response')
+  pred_gb<-as.data.frame(pred_gb)
+  gbm<-ifelse(pred_gb$'0' > pred_gb$'1', 0, 1)
+  true_positives <- sum(data_te$Distant_Metastasis == 1 & gbm == 1)
+  true_negative <- sum(data_te$Distant_Metastasis == 0 & gbm == 0)
+  false_negatives <- sum(data_te$Distant_Metastasis == 1 & gbm == 0)
+  false_positive <- sum(data_te$Distant_Metastasis == 0 & gbm == 1)
+
+#accuracy
+acc_gbm<- (true_positives+true_negative)/(true_positives
+                                          +true_negative+false_negatives+false_positive)
+  
+cat("Recall:", true_positives / (true_positives + false_negatives),  "\n")
+cat("Precision:", true_positives / (true_positives + false_positive))
+
+gbm_recall <-true_positives / (true_positives + false_negatives)
+gbm_precision <- true_positives / (true_positives + false_positive)
+#auc
+roc_gbm<- roc(data_te$Distant_Metastasis, as.numeric(gbm), smooth = F)
+auc_gbm<- auc(roc_gbm)
+cat("AUC:", auc_gbm)
+```
+
+The best gbm function with best hyperparameters we selected through cross-validation are ntree=500 interaction.depth=1 shrinkage=0.01. Once we determined these best hyperparameters, we used the entire training set as the training model and made predictions in the test set, and calculated the AUC, precision and recall of the gbm model with ntree=500 interaction.depth=1 shrinkage=0.01 in the test set.
+
+
+
+The figure above gives the importance of the predictors for the best gbm model. We find as same as the random forest, mutation count is the most important predictor, which is actually more in line with medical practice.
+```{r}
+gbm_fit %>% vip(num_features = 10, horizontal = FALSE,
+                 aesthetics = list(fill = brewer.pal(10, "Paired"),
+                                   colorblindFriendly = TRUE, alpha = 1)) +
+  theme(axis.text.x = element_text(size = 5))
+
+```
+
+
+
+```{r}
+# Calculate the best split point and optimal threshold for the best gbm model in the test set
+(cutOffPoint_gbm<-coords(roc_gbm,'best'))
+cutOffPointText_gbm<-paste0(round(cutOffPoint_gbm[1],3),"(",round(cutOffPoint_gbm[2],3),",",
+round(cutOffPoint_gbm[3],3),")")
+```
+
+
+The ROC curve of the best gbm model in the test set is drawn and the confidence interval and AUC value of this ROC curve as well as the optimal split point and optimal threshold are indicated in the graph.
+
+```{r message=FALSE, warning=FALSE}
+gbm_ci<-ci.se(roc_gbm,specificities=seq(0,1,0.01))
+data_gbm_ci<-gbm_ci[1:101,1:3]
+data_gbm_ci<-as.data.frame(data_gbm_ci)
+x=as.numeric(rownames(data_gbm_ci))
+data_gbm_ci<-data.frame(x,data_gbm_ci)
+ggroc(roc_gbm,col='purple',legacy.axes=F,cex=1)+
+geom_segment(aes(x=1,y=0,xend=0,yend=1),colour='black',linetype ='dotdash',cex=.8)+
+geom_ribbon(aes(x=x,ymin=X2.5.,ymax=X97.5.),fill='lightgreen',alpha=0.5,data_gbm_ci)+
+labs(title='GBM ROC')+
+geom_point(aes(x=cutOffPoint_gbm[[2]],y =cutOffPoint_gbm[[3]]),col='darkorange')+
+geom_text(aes(x = cutOffPoint_gbm[[2]],y=cutOffPoint_gbm[[3]],
+label=cutOffPointText_gbm,col='darkorange'),vjust=-1)+
+annotate(geom='text',x=0.06,y=0,label='AUC=0.6908213',col='darkgreen')+
+theme_light()+guides(colour='none')
+```
+
+The AUC values and ROC curves of this model in the test set indicate that this is a successful classification model, and we will make a uniform comparison with other models at the end to select the most suitable prediction model for our project.
+
+
+## Model Comparison 
+
+```{r}
+#F1 Score 
+f1_knn<-(2*knn_recall*knn_precision)/(knn_recall+knn_precision)
+f1_log<-(2*log_recall*log_precision)/(log_recall+log_precision) 
+f1_rf<-(2*rt_recall*rt_precision)/(rt_recall+rt_precision)
+f1_gbm<-(2*gbm_recall*gbm_precision)/(gbm_recall+gbm_precision)
+
+#Accuracy 
+acc_knn
+acc_log
+acc_rf
+acc_gbm
+```
+
+```{r Model Comparison}
+fold_result <- data.frame(KNN = c(knn_recall, knn_precision, auc_knn, f1_knn, acc_knn),
+                          LogR = c(log_recall, log_precision, auc_log, f1_log, acc_log),
+                          Random_Forest = c(rt_recall, rt_precision, auc_rt, f1_rf, acc_rf),
+                          Gradient_Boosting_Tree =c(gbm_recall,gbm_precision, auc_gbm, f1_gbm, acc_gbm))
+row.names(fold_result) <- c('Recall', 'Precision', 'AUC', 'F1','Accuracy')
+pander(fold_result, caption = 'Comparison Table of Recall, Precision, AUC Test Results for All Methods')
+
+ggroc(list(KNN = roc_knn,
+           Log = roc_log,
+           RandomForest= roc_rt,
+           GradientBoost = roc_gbm),size=1,alpha=0.6) +
+  ggtitle("ROC Curves Comparison") +
+  scale_color_manual(values = c("red", "green", "orange","purple"),
+                     labels = c(paste("KNN (AUC =", auc_knn, ")"),
+                                paste("Logistic Regression (AUC =", auc_log, ")"),
+                                  paste("Random Forest (AUC =", auc_rt, ")"),
+                                  paste("Gradient Boost (AUC =", auc_gbm, ")")))+
+  theme_light()+geom_segment(aes(x=1,y=0,xend=0,yend=1),colour='black',linetype =8,cex=.5,alpha=.6)
+```
+
+
+
+Firstly, by comparing the ROC curves of the four models we can see that the GBM model has the best classification result because it has the largest area under the curve, i.e. the AUC value.
+
+Looking at the parameters evaluated by the four traditional classifiers, accuracy, precision, recall and F1 value. It is also the GBM that has the best results because it has both the highest accuracy, representing the highest percentage of correct predictions of the model; the highest precision, i.e. the proportion of correct predictions that are positive to all positive predictions; and the highest recall, i.e. the proportion of correct predictions that are positive to all actual positive predictions, which is one of the most important metrics we look at in our study because cancer metastasis is in reality both for patients The F1 value is the summed average of the precision and recall rates. We know that precision and recall affect each other, and ideally we would want both to be high, but in reality they are ‘constrained’: if we want precision to be high, recall will be low; if we want recall to be high, precision will usually be affected.
+
+In this case, we find that the GBM model has the highest recall, precision, accuracy and recall for all the parameters that discriminate between good and bad classifiers, so we will use the GBM model with shrinkage=0.01 ntree=500,interaction.depth=1 selected in the cross-validation as our final model
+
+
+
+
+
+
+
+
+
+
+
